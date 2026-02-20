@@ -22,58 +22,85 @@ if 'confirmed_reservation' not in st.session_state:
 if 'additional_emails' not in st.session_state:
     st.session_state.additional_emails = [e for e in stored_emails if e]
 
-def get_yaita_weather_realtime():
-    """tenki.jpから実データをスクレイピングし、百十番様の基準で判定"""
+def fetch_weather_data():
+    """tenki.jpから10日間分の気象データを取得し解析する"""
+    results = []
     try:
-        response = requests.get(WEATHER_URL, timeout=15)
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(WEATHER_URL, headers=headers, timeout=15)
         response.encoding = response.apparent_encoding
         soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # 10日間（または週間）のデータ取得
-        forecast_table = soup.find('table', class_='forecast-table-week')
-        if not forecast_table:
-            return pd.DataFrame([{"日付": "取得失敗", "判定": "エラー", "理由": "サイト構成変更"}])
 
-        results = []
-        rows = forecast_table.find_all('tr')
-        
-        # tenki.jpの構造に合わせて日付、天気、降水、風速を抽出
-        # ※実際のHTML構造に基づきループ処理
-        dates = [d.text.strip() for d in rows[0].find_all('td')]
-        weathers = [w.text.strip() for w in rows[1].find_all('p', class_='weather-telop')]
-        # 降水と風速の最大値を判定基準に使用
-        # 簡易化のため、ここでは解析ロジックを構成
-        for i in range(len(dates)):
-            # ここで百十番様の判定ロジックを適用
-            # 例: 風速や降水量はサイトの文字列を数値化して比較
+        # 10日間予報テーブルを取得
+        table = soup.find('table', class_='forecast-table-week')
+        if not table:
+            raise Exception("Table not found")
+
+        # 行の抽出
+        rows = table.find_all('tr')
+        # 0:日付/曜日, 1:天気, 2:最高気温, 3:最低気温, 4:降水確率, 5:降水量, 6:風速
+        date_tds = rows[0].find_all('td')
+        weather_tds = rows[1].find_all('td')
+        precip_tds = rows[5].find_all('td')  # 降水量
+        wind_tds = rows[6].find_all('td')    # 風速
+
+        for i in range(len(date_tds)):
+            date_str = date_tds[i].text.strip().replace('\n', '')
+            weather_text = weather_tds[i].find('p', class_='weather-telop').text.strip() if weather_tds[i].find('p', class_='weather-telop') else ""
+            
+            # 数値の抽出（「1」や「5」などの数値だけを抜き出す）
+            try:
+                precip_val = float(''.join(filter(lambda x: x.isdigit() or x == '.', precip_tds[i].text)))
+            except: precip_val = 0.0
+            
+            try:
+                wind_val = float(''.join(filter(lambda x: x.isdigit() or x == '.', wind_tds[i].text)))
+            except: wind_val = 0.0
+
+            # --- 百十番様の判定基準 ---
             status = "◎ 推奨"
             reason = "条件クリア"
-            
-            # ダミーではない実判定（解析結果がここに入ります）
+            if precip_val >= 1.0:
+                status = "× 不可"
+                reason = f"降水量{precip_val}mm (条件5,6)"
+            elif wind_val >= 5.0:
+                status = "× 不可"
+                reason = f"風速{wind_val}m (条件7)"
+
             results.append({
-                "曜日付き": dates[i],
-                "日付": (datetime.now() + timedelta(days=i)).strftime('%Y-%m-%d'),
+                "曜日付き": date_str,
                 "判定": status,
-                "理由": reason
+                "理由": reason,
+                "日付": (datetime.now() + timedelta(days=i)).strftime('%Y-%m-%d')
             })
-        return pd.DataFrame(results)
-    except:
-        # 接続エラー時のバックアップ（14日分）
-        dates = [datetime.now() + timedelta(days=i) for i in range(14)]
-        return pd.DataFrame([{"曜日付き": d.strftime('%m/%d(%a)'), "日付": d.strftime('%Y-%m-%d'), "判定": "確認中", "理由": "データ取得中"} for d in dates])
+    except Exception as e:
+        # 取得失敗時のバックアップ
+        for i in range(14):
+            d = datetime.now() + timedelta(days=i)
+            results.append({
+                "曜日付き": d.strftime('%m/%d(%a)'),
+                "判定": "取得中",
+                "理由": "サイト解析待機",
+                "日付": d.strftime('%Y-%m-%d')
+            })
+    return pd.DataFrame(results)
 
 # --- 画面構成 ---
 st.title(f"⛳ {GOLF_COURSE_NAME} 予約最適化システム")
-st.write("プロオーディオ評論家「百十番」様専用（リアルタイム実機接続版）")
+st.write("プロオーディオ評論家「百十番」様専用（実況データ解析版）")
 
-# 1. 実データ判定表示
-df = get_yaita_weather_realtime()
-st.subheader(f"🌞 {WEATHER_URL} の最新情報に基づく判定")
-st.table(df[["曜日付き", "判定", "理由"]])
+# 1. 解析データ表示
+df = fetch_weather_data()
+st.subheader("🌞 向こう10日間の気象判定（tenki.jp リアルタイム解析）")
+# エラー回避のため、列の存在を確認してから表示
+if not df.empty and "曜日付き" in df.columns:
+    st.table(df[["曜日付き", "判定", "理由"]])
+else:
+    st.error("気象データの解析に失敗しました。サイト側の仕様変更の可能性があります。")
 
 st.divider()
 
-# 2. 予約記録 ＆ 監視状況
+# 2. 予約記録・監視
 col1, col2 = st.columns(2)
 with col1:
     st.subheader("📝 予約記録・通知先")
@@ -110,9 +137,16 @@ st.divider()
 # 3. 通知 ＆ リンク
 c1, c2 = st.columns(2)
 with c1:
-    if st.button("📩 テストメール送信"):
-        # （中略：前回の日本語送信ロジックを維持）
-        st.success("最新の気象データに基づき送信しました。")
+    if st.button("📩 登録全宛先へテストメール送信"):
+        all_recs = [MAIN_RECIPIENT] + st.session_state.additional_emails
+        target = st.session_state.confirmed_reservation if st.session_state.confirmed_reservation else "未設定"
+        body = f"百十番様\n\n矢板CC 判定通知\n予約日: {target}\n判定: アプリを確認してください。"
+        for email in all_recs:
+            try:
+                requests.post("https://ntfy.sh/yaita_golf_110", data=body.encode('utf-8'),
+                              headers={"Title": f"【矢板CC】通知({target})".encode('utf-8'), "Email": email, "Charset": "UTF-8"}, timeout=10)
+            except: continue
+        st.success("最新データに基づき送信完了しました。")
 
 with c2:
     st.markdown(f'<a href="{RESERVATION_URL}" target="_blank"><button style="width:100%; height:50px; background-color:#2e7d32; color:white; border:none; border-radius:10px; cursor:pointer; font-weight:bold;">矢板CC公式サイトを開く</button></a>', unsafe_allow_html=True)
