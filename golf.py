@@ -7,7 +7,7 @@ st.set_page_config(page_title="矢板CC 予約最適化システム", layout="wi
 
 # 固定情報
 GOLF_COURSE_NAME = "矢板カントリークラブ"
-RESERVATION_URL = "https://yaitacc.com/"
+RESERVATION_URL = "https://yaita-cc.com/"
 
 st.title(f"⛳ {GOLF_COURSE_NAME} 予約支援システム")
 
@@ -49,4 +49,5 @@ st.divider()
 st.subheader("📝 予約状況の記録")
 res_date = st.date_input("予約した日を選択", value=datetime.now())
 if st.button("予約確定として保存"):
+
     st.success(f"{res_date} の予約をシステムに保存しました。")
