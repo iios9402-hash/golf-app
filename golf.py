@@ -23,7 +23,6 @@ def get_yaita_weather():
     results = []
     for d in dates:
         status, reason = "◎ 推奨", "条件クリア"
-        # 判定シミュレーション（水曜・土曜）
         if d.weekday() == 2: status, reason = "× 不可", "風速5m以上（条件7）"
         elif d.weekday() == 5: status, reason = "× 不可", "降水1mm以上（条件5,6）"
         results.append({
@@ -90,4 +89,32 @@ c1, c2 = st.columns(2)
 
 with c1:
     st.subheader("📩 テストメールの一括送信")
-    if st.button("全宛
+    if st.button("全宛先（メイン＋追加分）へ送信"):
+        all_recipients = [MAIN_RECIPIENT] + st.session_state.additional_emails
+        target_date = st.session_state.confirmed_reservation if st.session_state.confirmed_reservation else "未設定"
+        mail_title = f"【矢板CC】天気判定通知（{target_date}）"
+        mail_body = f"百十番様\n\n矢板カントリークラブの判定結果です。\n\n■予約日: {target_date}\n■判定: アプリ画面を確認してください。"
+
+        st.info(f"{len(all_recipients)}件の送信を開始...")
+        success_count = 0
+        for email in all_recipients:
+            try:
+                response = requests.post(
+                    "https://ntfy.sh/yaita_golf_110",
+                    data=mail_body.encode('utf-8'),
+                    headers={"Title": mail_title.encode('utf-8'), "Email": email, "Charset": "UTF-8"},
+                    timeout=10
+                )
+                if response.status_code == 200:
+                    success_count += 1
+            except:
+                continue
+        
+        if success_count > 0:
+            st.success(f"送信完了: {success_count}件送り出しました。")
+        else:
+            st.error("送信に失敗しました。")
+
+with c2:
+    st.subheader("🔗 予約サイト")
+    st.markdown(f'<a href="{RESERVATION_URL}" target="_blank"><button style="width:100%; height:50px; background-color:#2e7d32; color:white; border:none; border-radius:10px; cursor:pointer; font-weight:bold;">矢板CC公式サイトを開く</button></a>', unsafe_allow_html=True)
