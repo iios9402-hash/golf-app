@@ -11,22 +11,22 @@ RESERVATION_URL = "https://yaita-cc.com/"
 TENKI_JP_URL = "https://tenki.jp/leisure/golf/3/12/644217/week.html"
 MAIN_RECIPIENT = "iios9402@yahoo.co.jp"
 
-# 2週間分の天気・降水・風速、および天気コード(weather_code)を取得
-API_URL = "https://api.open-meteo.com/v1/forecast?latitude=36.8039&longitude=139.9042&daily=weather_code,precipitation_sum,wind_speed_10m_max&timezone=Asia%2FTokyo&wind_speed_unit=ms&forecast_days=14"
+# 矢板CCのピンポイント座標（北緯36.809, 東経139.907）に修正
+API_URL = "https://api.open-meteo.com/v1/forecast?latitude=36.8091&longitude=139.9073&daily=weather_code,precipitation_sum,wind_speed_10m_max&timezone=Asia%2FTokyo&wind_speed_unit=ms&forecast_days=14"
 
 if 'confirmed_reservation' not in st.session_state:
     st.session_state.confirmed_reservation = st.query_params.get("date", None)
 
 def get_weather_desc(code):
-    """天気コードを日本語に変換し、雨が含まれるか判定"""
-    # WMO Weather interpretation codes (WW)に基づく簡易変換
+    """天気コードを日本語に変換"""
+    # 51以上を雨系統として判定
     rain_codes = [51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82, 95, 96, 99]
     is_rain = code in rain_codes
     desc = "雨" if is_rain else "晴/曇"
     return desc, is_rain
 
 def fetch_weather_data():
-    """2週間分のデータを取得し、11-13日目の特別ルールを適用"""
+    """2週間分のデータを取得し、特別ルールを適用"""
     try:
         res = requests.get(API_URL, timeout=10)
         data = res.json()
@@ -42,7 +42,7 @@ def fetch_weather_data():
             status = "◎ 推奨"
             reason = "条件クリア"
 
-            # 共通ルール: 雨1mm以上または風5m以上
+            # 基本ルール
             if p_val >= 1.0:
                 status = "× 不可"
                 reason = f"降水 {p_val}mm"
@@ -50,12 +50,10 @@ def fetch_weather_data():
                 status = "× 不可"
                 reason = f"風速 {w_val}m"
             
-            # 11-13日目の特別ルール: 「雨」の文字が入れば不可
-            # インデックスiは0から始まるため、10, 11, 12が11, 12, 13日目に相当
-            if i in [10, 11, 12]:
-                if is_rain:
-                    status = "× 不可"
-                    reason = "雨予報 (11-13日目規定)"
+            # 11-13日目特別ルール (i=10, 11, 12)
+            if i in [10, 11, 12] and is_rain:
+                status = "× 不可"
+                reason = "雨予報 (11-13日目規定)"
 
             results.append({
                 "曜日付き": d_obj.strftime('%m/%d(%a)'),
@@ -70,7 +68,7 @@ def fetch_weather_data():
 
 # --- 画面構成 ---
 st.title(f"⛳ {GOLF_COURSE_NAME} 予約最適化システム")
-st.write("プロオーディオ評論家「百十番」様専用（2週間判定強化モデル）")
+st.write("プロオーディオ評論家「百十番」様専用")
 
 df = fetch_weather_data()
 
@@ -78,9 +76,10 @@ df = fetch_weather_data()
 st.subheader("🌞 向こう2週間の気象判定")
 if not df.empty:
     st.table(df[["曜日付き", "天気", "判定", "理由"]])
-    st.caption(f"情報源: [tenki.jp 矢板カントリークラブ以前の予報]({TENKI_JP_URL})")
+    # リンク表示の修正
+    st.markdown(f"情報源: [tenki.jp 矢板カントリークラブ２週間予報]({TENKI_JP_URL})")
 else:
-    st.error("データ取得エラー。")
+    st.error("データ取得エラーが発生しました。")
 
 st.divider()
 
@@ -117,7 +116,7 @@ c1, c2 = st.columns(2)
 with c1:
     if st.button("📩 テストメール送信"):
         target = st.session_state.confirmed_reservation if st.session_state.confirmed_reservation else "未設定"
-        body = f"百十番様\n\n矢板CC 判定結果\n予約日: {target}\n判定: アプリを確認してください。"
+        body = f"百十番様\n\n矢板CC 判定通知\n予約日: {target}\n判定: アプリを確認してください。"
         requests.post("https://ntfy.sh/yaita_golf_110", data=body.encode('utf-8'),
                       headers={"Title": f"【矢板CC】通知({target})".encode('utf-8'), "Email": MAIN_RECIPIENT, "Charset": "UTF-8"}, timeout=10)
         st.success("最新データで送信完了しました。")
