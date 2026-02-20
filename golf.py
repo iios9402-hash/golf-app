@@ -11,23 +11,26 @@ RESERVATION_URL = "https://yaita-cc.com/"
 TENKI_JP_URL = "https://tenki.jp/leisure/golf/3/12/644217/week.html"
 MAIN_RECIPIENT = "iios9402@yahoo.co.jp"
 
-# 気象庁(JMA)のモデルを指定して、日本国内の予報精度を最大化
-API_URL = "https://api.open-meteo.com/v1/forecast?latitude=36.8091&longitude=139.9073&daily=weather_code,precipitation_sum,wind_speed_10m_max&timezone=Asia%2FTokyo&wind_speed_unit=ms&forecast_days=14&models=jma_seamless"
+# 接続の安定性を最優先した高精度API（2週間分）
+API_URL = "https://api.open-meteo.com/v1/forecast?latitude=36.8091&longitude=139.9073&daily=weather_code,precipitation_sum,wind_speed_10m_max&timezone=Asia%2FTokyo&wind_speed_unit=ms&forecast_days=14"
 
+# URLパラメータからの復元（リロード対策）
 if 'confirmed_reservation' not in st.session_state:
     st.session_state.confirmed_reservation = st.query_params.get("date", None)
 
 def get_weather_info(code):
     """天気コードから判定用のフラグを取得"""
+    # 51以上のコードを雨系統として判定
     rain_codes = [51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82, 95, 96, 99]
     is_rain = code in rain_codes
     desc = "雨" if is_rain else "晴/曇"
     return desc, is_rain
 
 def fetch_weather_stable():
-    """高解像度JMAモデルから2週間分を取得"""
+    """安定性を重視したデータ取得ロジック"""
     try:
-        res = requests.get(API_URL, timeout=10)
+        res = requests.get(API_URL, timeout=15)
+        res.raise_for_status()
         data = res.json()
         daily = data['daily']
         results = []
@@ -41,6 +44,7 @@ def fetch_weather_stable():
             status = "◎ 推奨"
             reason = "条件クリア"
 
+            # 共通判定ルール
             if p_val >= 1.0:
                 status = "× 不可"
                 reason = f"降水 {p_val}mm"
@@ -48,7 +52,7 @@ def fetch_weather_stable():
                 status = "× 不可"
                 reason = f"風速 {w_val}m"
             
-            # 11-13日目特別ルール
+            # 11-13日目特別ルール（雨の文字判定）
             if i in [10, 11, 12] and is_rain:
                 status = "× 不可"
                 reason = "雨予報 (11-13日目規定)"
@@ -67,15 +71,17 @@ def fetch_weather_stable():
 # --- 画面構成 ---
 st.title(f"⛳ {GOLF_COURSE_NAME} 予約最適化システム")
 
+# データの取得
 df = fetch_weather_stable()
 
-# 1. 2週間判定
+# 1. 2週間判定（全表示）
 st.subheader("🌞 向こう2週間の気象判定")
 if not df.empty:
     st.table(df[["曜日付き", "天気", "判定", "理由"]])
+    # 情報源リンクを確実に表示
     st.markdown(f"情報源: [tenki.jp 矢板カントリークラブ２週間予報]({TENKI_JP_URL})")
 else:
-    st.error("データの取得に失敗しました。リロードしてください。")
+    st.error("データの取得に失敗しました。サイト側の応答がないため、しばらく待ってからリロードしてください。")
 
 st.divider()
 
@@ -103,16 +109,23 @@ with col2:
                 st.error(f"⚠️ 警告: {curr['曜日付き']} は【{curr['理由']}】です。")
             else:
                 st.success(f"✅ 良好: {curr['曜日付き']} は条件をクリアしています。")
+    else:
+        st.info("予約日を保存して判定を確認してください。")
 
 st.divider()
 
-# 3. 通知テスト
-if st.button("📩 最新の判定結果をメール送信"):
-    target = st.session_state.confirmed_reservation if st.session_state.confirmed_reservation else "未設定"
-    body = f"百十番様\n\n矢板CC 判定結果\n予約日: {target}\n判定: アプリを確認してください。"
-    try:
-        requests.post("https://ntfy.sh/yaita_golf_110", data=body.encode('utf-8'),
-                      headers={"Title": f"【矢板CC】判定({target})".encode('utf-8'), "Email": MAIN_RECIPIENT, "Charset": "UTF-8"}, timeout=10)
-        st.success("送信完了しました。")
-    except:
-        st.error("送信エラー")
+# 3. 通知・リンク
+c1, c2 = st.columns(2)
+with c1:
+    if st.button("📩 最新の判定結果をメール送信"):
+        target = st.session_state.confirmed_reservation if st.session_state.confirmed_reservation else "未設定"
+        body = f"百十番様\n\n矢板CC 判定結果\n予約日: {target}\n判定: アプリを確認してください。"
+        try:
+            requests.post("https://ntfy.sh/yaita_golf_110", data=body.encode('utf-8'),
+                          headers={"Title": f"【矢板CC】判定({target})".encode('utf-8'), "Email": MAIN_RECIPIENT, "Charset": "UTF-8"}, timeout=10)
+            st.success("送信完了しました。")
+        except:
+            st.error("送信エラー")
+
+with c2:
+    st.markdown(f'<a href="{RESERVATION_URL}" target="_blank"><button style="width:100%; height:50px; background-color:#2e7d32; color:white; border:none; border-radius:10px; cursor:pointer; font-weight:bold;">矢板CC 公式サイトを開く</button></a>', unsafe_allow_html=True)
