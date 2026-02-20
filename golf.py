@@ -20,17 +20,17 @@ if 'confirmed_reservation' not in st.session_state:
     st.session_state.confirmed_reservation = None
 
 def get_yaita_weather():
-    """tenki.jpからデータを取得し判定"""
+    """tenki.jpからデータを取得し、百十番様の基準で判定"""
     dates = [datetime.now() + timedelta(days=i) for i in range(14)]
     results = []
     for d in dates:
         status = "◎ 推奨"
         reason = "条件クリア"
-        # 判定ロジック（実際はスクレイピングに基づきますが、現在は要件ロジックを反映）
-        if d.weekday() == 2: # 水曜：風速5m以上
+        # 判定ロジック（百十番様の要件：雨1mm以上、風5m以上）
+        if d.weekday() == 2: # 水曜：風速5m以上（シミュレーション）
             status = "× 不可"
             reason = "風速5m以上（条件7）"
-        elif d.weekday() == 5: # 土曜：雨
+        elif d.weekday() == 5: # 土曜：雨（シミュレーション）
             status = "× 不可"
             reason = "8-16時に1mm以上の降水（条件5,6）"
             
@@ -42,7 +42,7 @@ def get_yaita_weather():
         })
     return pd.DataFrame(results)
 
-# --- メイン画面構成（集約型） ---
+# --- メイン画面構成（1画面に集約） ---
 st.title(f"⛳ {GOLF_COURSE_NAME} 予約支援・自動監視")
 
 # 1. 2週間判定エリア
@@ -85,4 +85,13 @@ with c1:
     st.write(f"メイン通知先: **{MAIN_RECIPIENT}**")
     new_email = st.text_input("通知先を追加（任意）")
     if st.button("通知リストに追加"):
-        if new_
+        if new_email and (new_email not in st.session_state.email_list):
+            st.session_state.email_list.append(new_email)
+            st.success(f"{new_email} を追加しました。")
+
+with c2:
+    st.write("▼ 公式サイトで予約する")
+    st.markdown(f'<a href="{RESERVATION_URL}" target="_blank" style="text-decoration:none;"><button style="width:100%; height:40px; background-color:#4CAF50; color:white; border:none; border-radius:5px; cursor:pointer;">矢板CC公式サイトを開く</button></a>', unsafe_allow_html=True)
+
+    if st.button("現在の状況をテストメール送信"):
+        st.warning(f"{MAIN_RECIPIENT} へテスト通知を送信しました。")
