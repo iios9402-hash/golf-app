@@ -14,39 +14,41 @@ TENKI_JP_URL = "https://tenki.jp/leisure/golf/3/12/644217/week.html"
 MAIN_RECIPIENT = "iios9402@yahoo.co.jp"
 API_URL = "https://api.open-meteo.com/v1/forecast?latitude=36.8091&longitude=139.9073&daily=weather_code,precipitation_sum,wind_speed_10m_max&timezone=Asia%2FTokyo&wind_speed_unit=ms&forecast_days=14"
 
-# --- GitHub永続化設定（Secretsから取得） ---
-# これにより再起動してもGitHub上のsettings.jsonを正しく読み書きします
-GITHUB_TOKEN = st.secrets.get("GH_TOKEN") # GitHubのPersonal Access Token
-REPO_NAME = st.secrets.get("GH_REPO")   # 例: "user/reponame"
+# --- GitHub永続化設定（空白・改行対策を強化） ---
+GITHUB_TOKEN = str(st.secrets.get("GH_TOKEN", "")).strip()
+REPO_NAME = str(st.secrets.get("GH_REPO", "")).strip()
 FILE_PATH = "settings.json"
 
 def load_settings_from_github():
-    """GitHub上のsettings.jsonを直接読み込む"""
+    if not GITHUB_TOKEN or not REPO_NAME:
+        return {"date": None, "emails": ""}, None
     url = f"https://api.github.com/repos/{REPO_NAME}/contents/{FILE_PATH}"
-    headers = {"Authorization": f"token {GITHUB_TOKEN}"}
+    headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
     try:
-        res = requests.get(url, headers=headers)
+        res = requests.get(url, headers=headers, timeout=10)
         if res.status_code == 200:
             content = base64.b64decode(res.json()['content']).decode('utf-8')
-            data = json.loads(content)
-            return data, res.json()['sha']
+            return json.loads(content), res.json()['sha']
     except:
         pass
     return {"date": None, "emails": ""}, None
 
 def save_settings_to_github(date_str, emails_str, current_sha):
-    """GitHub上のsettings.jsonを直接上書き保存する"""
     url = f"https://api.github.com/repos/{REPO_NAME}/contents/{FILE_PATH}"
-    headers = {"Authorization": f"token {GITHUB_TOKEN}"}
+    headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
+    content_json = json.dumps({"date": date_str, "emails": emails_str}, ensure_ascii=False)
     data = {
-        "message": "Update settings from App",
-        "content": base64.b64encode(json.dumps({"date": date_str, "emails": emails_str}).encode('utf-8')).decode('utf-8'),
+        "message": "Update settings via App",
+        "content": base64.b64encode(content_json.encode('utf-8')).decode('utf-8'),
         "sha": current_sha
     }
-    res = requests.put(url, headers=headers, json=data)
-    return res.status_code == 200
+    try:
+        res = requests.put(url, headers=headers, json=data, timeout=10)
+        return res.status_code in [200, 201]
+    except:
+        return False
 
-# データのロード
+# 起動時のロード
 settings_data, file_sha = load_settings_from_github()
 
 if 'confirmed_reservation' not in st.session_state:
@@ -78,11 +80,10 @@ def fetch_weather():
         return pd.DataFrame(results)
     except: return pd.DataFrame()
 
-# --- 画面構成 ---
+# --- UI ---
 st.title(f"⛳ {GOLF_COURSE_NAME} 予約最適化システム")
 df = fetch_weather()
 
-# 1. 2週間判定
 st.subheader("🌞 向こう2週間の気象判定")
 if not df.empty:
     st.table(df[["曜日付き", "天気", "判定", "理由"]])
@@ -90,7 +91,6 @@ if not df.empty:
 
 st.divider()
 
-# 2. 設定・管理
 col1, col2 = st.columns(2)
 with col1:
     st.subheader("📝 予約・通知設定")
@@ -103,15 +103,17 @@ with col1:
     new_emails_str = st.text_area("追加通知先メールアドレス（カンマ区切り）", value=",".join(st.session_state.additional_emails))
     
     if st.button("設定を完全に保存する"):
-        date_str = new_date.strftime('%Y-%m-%d')
-        success = save_settings_to_github(date_str, new_emails_str, file_sha)
-        if success:
-            st.session_state.confirmed_reservation = date_str
-            st.session_state.additional_emails = [e.strip() for e in new_emails_str.split(",") if e]
-            st.success("GitHub上のマスターデータを更新しました。再起動後も保持されます。")
-            st.rerun()
+        if not file_sha:
+            st.error("GitHubからの読み込みに失敗しているため保存できません。Secretsの設定を確認してください。")
         else:
-            st.error("GitHub連携エラー。Secretsの設定を確認してください。")
+            date_str = new_date.strftime('%Y-%m-%d')
+            if save_settings_to_github(date_str, new_emails_str, file_sha):
+                st.session_state.confirmed_reservation = date_str
+                st.session_state.additional_emails = [e.strip() for e in new_emails_str.split(",") if e]
+                st.success("GitHub上のマスターデータを更新しました。")
+                st.rerun()
+            else:
+                st.error("保存に失敗しました。トークンの権限またはリポジトリ名を確認してください。")
 
 with col2:
     st.subheader("🚨 判定アラート")
@@ -126,7 +128,6 @@ with col2:
 
 st.divider()
 
-# 3. 通知テスト
 if st.button("📩 登録全アドレスへテストメール送信"):
     all_recipients = [MAIN_RECIPIENT] + st.session_state.additional_emails
     target = st.session_state.confirmed_reservation if st.session_state.confirmed_reservation else "未設定"
