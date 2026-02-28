@@ -12,16 +12,19 @@ GOLF_COURSE_NAME = "矢板カントリークラブ"
 RESERVATION_URL = "https://yaita-cc.com/"
 TENKI_JP_URL = "https://tenki.jp/leisure/golf/3/12/644217/week.html"
 MAIN_RECIPIENT = "iios9402@yahoo.co.jp"
+# 天気API（予備を含めた安定接続用）
 API_URL = "https://api.open-meteo.com/v1/forecast?latitude=36.8091&longitude=139.9073&daily=weather_code,precipitation_sum,wind_speed_10m_max&timezone=Asia%2FTokyo&wind_speed_unit=ms&forecast_days=14"
 
-# --- GitHub永続化設定（空白・改行対策を強化） ---
+# --- GitHub永続化設定（空白・改行除去を徹底） ---
 GITHUB_TOKEN = str(st.secrets.get("GH_TOKEN", "")).strip()
 REPO_NAME = str(st.secrets.get("GH_REPO", "")).strip()
 FILE_PATH = "settings.json"
 
-def load_settings_from_github():
+def load_settings_safe():
+    """GitHubから読込。失敗しても空データを返しアプリを止めない"""
+    default_vals = {"date": None, "emails": ""}
     if not GITHUB_TOKEN or not REPO_NAME:
-        return {"date": None, "emails": ""}, None
+        return default_settings, None
     url = f"https://api.github.com/repos/{REPO_NAME}/contents/{FILE_PATH}"
     headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
     try:
@@ -31,25 +34,27 @@ def load_settings_from_github():
             return json.loads(content), res.json()['sha']
     except:
         pass
-    return {"date": None, "emails": ""}, None
+    return default_vals, None
 
-def save_settings_to_github(date_str, emails_str, current_sha):
+def save_settings_safe(date_str, emails_str, current_sha):
+    """GitHubへ保存。shaが合わない場合も考慮"""
     url = f"https://api.github.com/repos/{REPO_NAME}/contents/{FILE_PATH}"
     headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
     content_json = json.dumps({"date": date_str, "emails": emails_str}, ensure_ascii=False)
     data = {
-        "message": "Update settings via App",
-        "content": base64.b64encode(content_json.encode('utf-8')).decode('utf-8'),
-        "sha": current_sha
+        "message": "Sync settings via App",
+        "content": base64.b64encode(content_json.encode('utf-8')).decode('utf-8')
     }
+    if current_sha:
+        data["sha"] = current_sha
     try:
         res = requests.put(url, headers=headers, json=data, timeout=10)
         return res.status_code in [200, 201]
     except:
         return False
 
-# 起動時のロード
-settings_data, file_sha = load_settings_from_github()
+# 起動時のデータロード
+settings_data, file_sha = load_settings_safe()
 
 if 'confirmed_reservation' not in st.session_state:
     st.session_state.confirmed_reservation = settings_data.get("date")
@@ -62,9 +67,11 @@ def get_weather_info(code):
     is_rain = code in rain_codes
     return ("雨" if is_rain else "晴/曇"), is_rain
 
-def fetch_weather():
+def fetch_weather_robust():
+    """気象データの取得。エラー時は空のリストを返す"""
     try:
         res = requests.get(API_URL, timeout=15)
+        res.raise_for_status()
         daily = res.json()['daily']
         results = []
         for i in range(len(daily['time'])):
@@ -75,22 +82,28 @@ def fetch_weather():
             status, reason = "◎ 推奨", "条件クリア"
             if p_val >= 1.0: status, reason = "× 不可", f"降水 {p_val}mm"
             elif w_val >= 5.0: status, reason = "× 不可", f"風速 {w_val}m"
-            if i in [10, 11, 12] and is_rain: status, reason = "× 不可", "雨予報 (規定)"
+            if i in [10, 11, 12] and is_rain: status, reason = "× 不可", "雨予報 (11-13日目規定)"
             results.append({"曜日付き": d_obj.strftime('%m/%d(%a)'), "天気": w_desc, "判定": status, "理由": reason, "日付": daily['time'][i]})
         return pd.DataFrame(results)
-    except: return pd.DataFrame()
+    except Exception as e:
+        st.error(f"天気データの取得中にエラーが発生しました。時間を置いてリロードしてください。")
+        return pd.DataFrame()
 
-# --- UI ---
+# --- UI構築 ---
 st.title(f"⛳ {GOLF_COURSE_NAME} 予約最適化システム")
-df = fetch_weather()
+df = fetch_weather_robust()
 
+# 1. 2週間判定（データがある場合のみ表示）
 st.subheader("🌞 向こう2週間の気象判定")
 if not df.empty:
     st.table(df[["曜日付き", "天気", "判定", "理由"]])
     st.markdown(f"情報源: [tenki.jp 矢板カントリークラブ２週間予報]({TENKI_JP_URL})")
+else:
+    st.warning("現在、気象データを表示できません。API制限または通信エラーの可能性があります。")
 
 st.divider()
 
+# 2. 設定・管理
 col1, col2 = st.columns(2)
 with col1:
     st.subheader("📝 予約・通知設定")
@@ -100,20 +113,17 @@ with col1:
         d_val = datetime.now()
     
     new_date = st.date_input("予約確定日を選択", value=d_val)
-    new_emails_str = st.text_area("追加通知先メールアドレス（カンマ区切り）", value=",".join(st.session_state.additional_emails))
+    new_emails_str = st.text_area("追加通知先メールアドレス", value=",".join(st.session_state.additional_emails))
     
     if st.button("設定を完全に保存する"):
-        if not file_sha:
-            st.error("GitHubからの読み込みに失敗しているため保存できません。Secretsの設定を確認してください。")
+        date_str = new_date.strftime('%Y-%m-%d')
+        if save_settings_safe(date_str, new_emails_str, file_sha):
+            st.session_state.confirmed_reservation = date_str
+            st.session_state.additional_emails = [e.strip() for e in new_emails_str.split(",") if e]
+            st.success("GitHub上のマスターデータを更新しました。")
+            st.rerun()
         else:
-            date_str = new_date.strftime('%Y-%m-%d')
-            if save_settings_to_github(date_str, new_emails_str, file_sha):
-                st.session_state.confirmed_reservation = date_str
-                st.session_state.additional_emails = [e.strip() for e in new_emails_str.split(",") if e]
-                st.success("GitHub上のマスターデータを更新しました。")
-                st.rerun()
-            else:
-                st.error("保存に失敗しました。トークンの権限またはリポジトリ名を確認してください。")
+            st.error("保存に失敗しました。再起動（Reboot）をお試しください。")
 
 with col2:
     st.subheader("🚨 判定アラート")
@@ -125,6 +135,8 @@ with col2:
                 st.error(f"⚠️ 警告: {curr['曜日付き']} は【{curr['理由']}】です。")
             else:
                 st.success(f"✅ 良好: {curr['曜日付き']} は条件をクリアしています。")
+    else:
+        st.info("予約日が設定されていないか、天気データが読み込めていません。")
 
 st.divider()
 
