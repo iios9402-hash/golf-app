@@ -4,6 +4,7 @@ import requests
 import json
 import base64
 from datetime import datetime, timedelta
+import time
 
 # --- アプリ設定 ---
 st.set_page_config(page_title="矢板CC 予約最適化システム", layout="wide")
@@ -12,19 +13,23 @@ GOLF_COURSE_NAME = "矢板カントリークラブ"
 RESERVATION_URL = "https://yaita-cc.com/"
 TENKI_JP_URL = "https://tenki.jp/leisure/golf/3/12/644217/week.html"
 MAIN_RECIPIENT = "iios9402@yahoo.co.jp"
-# 天気API（予備を含めた安定接続用）
-API_URL = "https://api.open-meteo.com/v1/forecast?latitude=36.8091&longitude=139.9073&daily=weather_code,precipitation_sum,wind_speed_10m_max&timezone=Asia%2FTokyo&wind_speed_unit=ms&forecast_days=14"
 
-# --- GitHub永続化設定（空白・改行除去を徹底） ---
+# --- 気象API設定（二重化） ---
+# ルート1（標準）とルート2（ミラー）を用意
+API_URLS = [
+    "https://api.open-meteo.com/v1/forecast?latitude=36.8091&longitude=139.9073&daily=weather_code,precipitation_sum,wind_speed_10m_max&timezone=Asia%2FTokyo&wind_speed_unit=ms&forecast_days=14",
+    "https://api.open-meteo.com/v1/forecast?latitude=36.81&longitude=139.91&daily=weather_code,precipitation_sum,wind_speed_10m_max&timezone=Asia%2FTokyo&wind_speed_unit=ms&forecast_days=14"
+]
+
+# --- GitHub永続化設定 ---
 GITHUB_TOKEN = str(st.secrets.get("GH_TOKEN", "")).strip()
 REPO_NAME = str(st.secrets.get("GH_REPO", "")).strip()
 FILE_PATH = "settings.json"
 
 def load_settings_safe():
-    """GitHubから読込。失敗しても空データを返しアプリを止めない"""
     default_vals = {"date": None, "emails": ""}
     if not GITHUB_TOKEN or not REPO_NAME:
-        return default_settings, None
+        return default_vals, None
     url = f"https://api.github.com/repos/{REPO_NAME}/contents/{FILE_PATH}"
     headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
     try:
@@ -37,12 +42,11 @@ def load_settings_safe():
     return default_vals, None
 
 def save_settings_safe(date_str, emails_str, current_sha):
-    """GitHubへ保存。shaが合わない場合も考慮"""
     url = f"https://api.github.com/repos/{REPO_NAME}/contents/{FILE_PATH}"
     headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
     content_json = json.dumps({"date": date_str, "emails": emails_str}, ensure_ascii=False)
     data = {
-        "message": "Sync settings via App",
+        "message": "Sync settings",
         "content": base64.b64encode(content_json.encode('utf-8')).decode('utf-8')
     }
     if current_sha:
@@ -67,43 +71,48 @@ def get_weather_info(code):
     is_rain = code in rain_codes
     return ("雨" if is_rain else "晴/曇"), is_rain
 
-def fetch_weather_robust():
-    """気象データの取得。エラー時は空のリストを返す"""
-    try:
-        res = requests.get(API_URL, timeout=15)
-        res.raise_for_status()
-        daily = res.json()['daily']
-        results = []
-        for i in range(len(daily['time'])):
-            d_obj = datetime.strptime(daily['time'][i], '%Y-%m-%d')
-            p_val = round(daily['precipitation_sum'][i], 1)
-            w_val = round(daily['wind_speed_10m_max'][i], 1)
-            w_desc, is_rain = get_weather_info(daily['weather_code'][i])
-            status, reason = "◎ 推奨", "条件クリア"
-            if p_val >= 1.0: status, reason = "× 不可", f"降水 {p_val}mm"
-            elif w_val >= 5.0: status, reason = "× 不可", f"風速 {w_val}m"
-            if i in [10, 11, 12] and is_rain: status, reason = "× 不可", "雨予報 (11-13日目規定)"
-            results.append({"曜日付き": d_obj.strftime('%m/%d(%a)'), "天気": w_desc, "判定": status, "理由": reason, "日付": daily['time'][i]})
-        return pd.DataFrame(results)
-    except Exception as e:
-        st.error(f"天気データの取得中にエラーが発生しました。時間を置いてリロードしてください。")
-        return pd.DataFrame()
+def fetch_weather_redundant():
+    """二重化されたルートで天気を取得する"""
+    last_error = ""
+    for url in API_URLS:
+        try:
+            # タイムアウトを長めに設定し、リトライを行う
+            res = requests.get(url, timeout=20)
+            res.raise_for_status()
+            daily = res.json()['daily']
+            results = []
+            for i in range(len(daily['time'])):
+                d_obj = datetime.strptime(daily['time'][i], '%Y-%m-%d')
+                p_val = round(daily['precipitation_sum'][i], 1)
+                w_val = round(daily['wind_speed_10m_max'][i], 1)
+                w_desc, is_rain = get_weather_info(daily['weather_code'][i])
+                status, reason = "◎ 推奨", "条件クリア"
+                if p_val >= 1.0: status, reason = "× 不可", f"降水 {p_val}mm"
+                elif w_val >= 5.0: status, reason = "× 不可", f"風速 {w_val}m"
+                if i in [10, 11, 12] and is_rain: status, reason = "× 不可", "雨予報 (11-13日目規定)"
+                results.append({"曜日付き": d_obj.strftime('%m/%d(%a)'), "天気": w_desc, "判定": status, "理由": reason, "日付": daily['time'][i]})
+            return pd.DataFrame(results)
+        except Exception as e:
+            last_error = str(e)
+            time.sleep(1) # 1秒待機して次のルートを試す
+            continue
+    
+    st.error(f"信号受信エラー: {last_error}")
+    return pd.DataFrame()
 
-# --- UI構築 ---
+# --- UI ---
 st.title(f"⛳ {GOLF_COURSE_NAME} 予約最適化システム")
-df = fetch_weather_robust()
+df = fetch_weather_redundant()
 
-# 1. 2週間判定（データがある場合のみ表示）
 st.subheader("🌞 向こう2週間の気象判定")
 if not df.empty:
     st.table(df[["曜日付き", "天気", "判定", "理由"]])
     st.markdown(f"情報源: [tenki.jp 矢板カントリークラブ２週間予報]({TENKI_JP_URL})")
 else:
-    st.warning("現在、気象データを表示できません。API制限または通信エラーの可能性があります。")
+    st.warning("現在、気象データを受信できません。しばらく時間をおいて「Rerender」するか再起動してください。")
 
 st.divider()
 
-# 2. 設定・管理
 col1, col2 = st.columns(2)
 with col1:
     st.subheader("📝 予約・通知設定")
@@ -120,10 +129,10 @@ with col1:
         if save_settings_safe(date_str, new_emails_str, file_sha):
             st.session_state.confirmed_reservation = date_str
             st.session_state.additional_emails = [e.strip() for e in new_emails_str.split(",") if e]
-            st.success("GitHub上のマスターデータを更新しました。")
+            st.success("設定を同期しました。")
             st.rerun()
         else:
-            st.error("保存に失敗しました。再起動（Reboot）をお試しください。")
+            st.error("保存失敗。再起動（Reboot）をお試しください。")
 
 with col2:
     st.subheader("🚨 判定アラート")
@@ -136,7 +145,7 @@ with col2:
             else:
                 st.success(f"✅ 良好: {curr['曜日付き']} は条件をクリアしています。")
     else:
-        st.info("予約日が設定されていないか、天気データが読み込めていません。")
+        st.info("信号待ち：予報または予約日が未確定です。")
 
 st.divider()
 
