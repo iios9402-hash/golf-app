@@ -5,7 +5,7 @@ import json
 import base64
 from datetime import datetime, date
 
-# --- 4. 永続化仕様: キャッシュの強制クリア ---
+# --- 永続化仕様: キャッシュの強制クリア ---
 st.cache_data.clear()
 
 # --- 1. 基本コンセプト & 6. インターフェース仕様 ---
@@ -26,7 +26,7 @@ REPO_NAME = str(st.secrets.get("GH_REPO", "")).strip()
 FILE_PATH = "settings.json"
 
 def load_settings():
-    default_vals = {"date": "", "emails": ""}
+    default_vals = {"date": None, "emails": ""}
     if not GITHUB_TOKEN or not REPO_NAME: return default_vals, None
     url = f"https://api.github.com/repos/{REPO_NAME}/contents/{FILE_PATH}"
     headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
@@ -39,19 +39,17 @@ def load_settings():
             if data.get("date"):
                 try:
                     saved_date = datetime.strptime(data["date"], '%Y-%m-%d').date()
-                    if saved_date < date.today():
-                        data["date"] = ""
-                except: data["date"] = ""
+                    if saved_date < date.today(): data["date"] = None
+                except: data["date"] = None
             return data, res.json()['sha']
     except: pass
     return default_vals, None
 
-def save_settings(date_str, emails_str, current_sha):
+def save_settings(date_val, emails_str, current_sha):
     url = f"https://api.github.com/repos/{REPO_NAME}/contents/{FILE_PATH}"
     headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
-    # 日付がNoneなら空文字として保存
-    d_val = date_str if date_str else ""
-    content_json = json.dumps({"date": d_val, "emails": emails_str}, ensure_ascii=False)
+    # 保存データ。Noneの場合はnullとして保存
+    content_json = json.dumps({"date": date_val, "emails": emails_str}, ensure_ascii=False)
     payload = {"message": "Update settings", "content": base64.b64encode(content_json.encode('utf-8')).decode('utf-8'), "sha": current_sha}
     try:
         res = requests.put(url, headers=headers, json=payload, timeout=5)
@@ -60,13 +58,8 @@ def save_settings(date_str, emails_str, current_sha):
 
 # 設定ロード
 settings_data, file_sha = load_settings()
-# 予約日の初期化（"今日"をデフォルトにしない）
 if 'confirmed_reservation' not in st.session_state:
-    st.session_state.confirmed_reservation = settings_data.get("date", "")
-
-if 'additional_emails' not in st.session_state:
-    emails_raw = settings_data.get("emails", "")
-    st.session_state.additional_emails = [e.strip() for e in emails_raw.split(",") if e]
+    st.session_state.confirmed_reservation = settings_data.get("date")
 
 def fetch_weather():
     rain_codes = [51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82, 95, 96, 99]
@@ -105,34 +98,37 @@ st.divider()
 col1, col2 = st.columns(2)
 with col1:
     st.subheader("📝 予約・通知設定")
-    # 予約日があればその日、なければ今日を表示（ただし保存はしない）
-    c_date = date.today()
+    
+    # --- 修正: デフォルトを空白(None)にする ---
+    initial_date = None
     if st.session_state.confirmed_reservation:
-        try: c_date = datetime.strptime(st.session_state.confirmed_reservation, '%Y-%m-%d').date()
+        try: initial_date = datetime.strptime(st.session_state.confirmed_reservation, '%Y-%m-%d').date()
         except: pass
     
-    new_date = st.date_input("予約確定日を選択", value=c_date)
-    emails_text = ",".join(st.session_state.additional_emails)
+    # date_inputのvalueをNoneにすることで「空欄」を実現
+    new_date = st.date_input("予約確定日を選択", value=initial_date, help="予約がない場合は空欄のままにしてください")
+    
+    emails_text = ",".join([e.strip() for e in settings_data.get("emails", "").split(",") if e])
     new_emails_str = st.text_area("追加通知先（カンマ区切り）", value=emails_text)
     
     btn_col1, btn_col2 = st.columns(2)
     with btn_col1:
         if st.button("設定を完全に保存する", use_container_width=True):
-            date_str = new_date.strftime('%Y-%m-%d')
-            if save_settings(date_str, new_emails_str, file_sha):
-                st.session_state.confirmed_reservation = date_str
+            save_val = new_date.strftime('%Y-%m-%d') if new_date else None
+            if save_settings(save_val, new_emails_str, file_sha):
+                st.session_state.confirmed_reservation = save_val
                 st.success("保存完了")
                 st.rerun()
     with btn_col2:
         if st.button("予約日をリセット", use_container_width=True):
-            if save_settings("", new_emails_str, file_sha):
-                st.session_state.confirmed_reservation = ""
-                st.warning("予約日をリセットしました")
+            if save_settings(None, new_emails_str, file_sha):
+                st.session_state.confirmed_reservation = None
+                st.warning("予約日を空欄にリセットしました")
                 st.rerun()
 
 with col2:
     st.subheader("🚨 判定アラート")
-    # 予約日が空文字でない場合のみ、判定ロジックを回す
+    # 予約日がNone（空）でない場合のみ、判定を表示
     if st.session_state.confirmed_reservation and df is not None:
         res_info = df[df["日付キー"] == st.session_state.confirmed_reservation]
         if not res_info.empty:
